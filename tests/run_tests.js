@@ -333,5 +333,100 @@ t("ATR 模式全链路回测与风险指标正常", () => {
   assert(Number.isFinite(s.sharpe) && Number.isFinite(s.max_drawdown));
 });
 
+t("追踪模式止损随上涨逐日上移并按追踪价退出", () => {
+  // TR 恒为 2，ATR=2；i=20 以 open=120 入场，refIdx=19
+  const rows = Array.from({ length: 20 }, (_, i) => ({ date: "d" + i, open: 100 + i, high: 101 + i, low: 99 + i, close: 100 + i, volume: 1 }));
+  rows.push({ date: "d20", open: 120, high: 121, low: 119, close: 120, volume: 1 });
+  rows.push({ date: "d21", open: 121, high: 122, low: 120, close: 121, volume: 1 });
+  rows.push({ date: "d22", open: 122, high: 123, low: 121, close: 122, volume: 1 });
+  rows.push({ date: "d23", open: 123, high: 124, low: 122, close: 123, volume: 1 });
+  // 回落：最低 118.5 高于入场锁定止损 116，但低于已追踪上移的止损 119
+  rows.push({ date: "d24", open: 122, high: 123, low: 118.5, close: 119, volume: 1 });
+  const signal = new Array(25).fill(0);
+  for (let i = 19; i < 25; i++) signal[i] = 1; // 持仓期间信号保持做多
+  const r = bt.backtest({ rows }, { cash: 100000, feeRate: 0, slippageBp: 0, stopMode: "trail", atrStopMult: 2, atrTargetMult: 4, strategy: {} }, signal);
+  assert.strictEqual(r.trades.length, 1);
+  const tr = r.trades[0];
+  assert.strictEqual(tr.stop_mode, "trail");
+  assert.strictEqual(tr.stop_init, 116);   // 入场当日：120 − 2×2
+  assert.strictEqual(tr.target_init, 128); // 入场当日：120 + 2×4
+  assert.strictEqual(tr.stop_price, 119);  // 逐日追踪至 最高收盘 123 − 2×2
+  assert.strictEqual(tr.stop_updates, 3);  // 116 → 117 → 118 → 119
+  assert.strictEqual(tr.reason, "止损");
+  assert.strictEqual(tr.exit_price, 119);  // 入场锁定的 116 不会触发，追踪价 119 触发
+});
+
+t("追踪规则只紧不松且止盈随波动逐日收放", () => {
+  const atrArr = new Array(60).fill(2);
+  const volArr = bt.volStateSeries(atrArr, 50, 0.7, 1.3);
+  const cur = bt.resolveStops({
+    mode: "trail", entryPrice: 100, refIdx: 55, atrArr, volArr,
+    stopLoss: 0, takeProfit: 0, atrStopMult: 2, atrTargetMult: 4, lowMult: 0.8, highMult: 1.5,
+  });
+  assert.strictEqual(cur.stopPrice, 96);
+  assert.strictEqual(cur.targetPrice, 108);
+  // 价格上涨：止损上移至 105 − 2×2 = 101
+  bt.updateTrailStops(cur, { refIdx: 56, atrArr, volArr, highWater: 105, entryPrice: 100, atrStopMult: 2, atrTargetMult: 4, lowMult: 0.8, highMult: 1.5 });
+  assert.strictEqual(cur.stopPrice, 101);
+  // 波动放大（ATR 2→4、高波动乘数 1.5）：止损候选 105 − 4×2×1.5 = 93 更低 → 保持 101 不放松；止盈放宽至 100 + 4×4×1.5 = 124
+  const atrArr2 = atrArr.slice(); atrArr2[57] = 4;
+  const volArr2 = atrArr.map((_, i) => (i === 57 ? { state: "高波动", ratio: 2 } : { state: "正常", ratio: 1 }));
+  bt.updateTrailStops(cur, { refIdx: 57, atrArr: atrArr2, volArr: volArr2, highWater: 105, entryPrice: 100, atrStopMult: 2, atrTargetMult: 4, lowMult: 0.8, highMult: 1.5 });
+  assert.strictEqual(cur.stopPrice, 101);
+  assert.strictEqual(cur.targetPrice, 124);
+  assert.strictEqual(cur.atrRef, 4);
+  assert.strictEqual(cur.volState, "高波动");
+  // 波动回落（ATR 1、低波动乘数 0.8）：止损收紧至 105 − 1×2×0.8 = 103.4；止盈收窄至 100 + 1×4×0.8 = 103.2
+  const atrArr3 = atrArr.slice(); atrArr3[58] = 1;
+  const volArr3 = atrArr.map((_, i) => (i === 58 ? { state: "低波动", ratio: 0.5 } : { state: "正常", ratio: 1 }));
+  bt.updateTrailStops(cur, { refIdx: 58, atrArr: atrArr3, volArr: volArr3, highWater: 105, entryPrice: 100, atrStopMult: 2, atrTargetMult: 4, lowMult: 0.8, highMult: 1.5 });
+  assert(Math.abs(cur.stopPrice - 103.4) < 1e-9);
+  assert(Math.abs(cur.targetPrice - 103.2) < 1e-9);
+});
+
+t("追踪模式不使用未来数据（截断行情结果一致）", () => {
+  const m = market.generateMarket({ seed: 5, days: 500 });
+  const opts = { cash: 100000, feeRate: 0.0005, slippageBp: 5, stopMode: "trail", strategy: { type: "ma_cross", fast: 10, slow: 30 } };
+  const full = bt.backtest(m, opts);
+  const cut = { rows: m.rows.slice(0, 200) };
+  const r2 = bt.backtest(cut, opts);
+  for (let i = 0; i < 200; i++) assert.strictEqual(r2.equity[i], full.equity[i]);
+});
+
+t("固定与 ATR 模式初始价等于锁定价且调整次数为 0", () => {
+  const m = market.generateMarket({ seed: 21, days: 600 });
+  const base = { cash: 100000, feeRate: 0.0005, slippageBp: 5, stopLoss: 0.05, takeProfit: 0.2, strategy: { type: "boll", bbN: 20, bbK: 2 } };
+  for (const r of [bt.backtest(m, base), bt.backtest(m, { ...base, stopMode: "atr", atrStopMult: 2, atrTargetMult: 4 })]) {
+    assert(r.trades.length > 0);
+    for (const tr of r.trades) {
+      assert.strictEqual(tr.stop_updates, 0);
+      assert.strictEqual(tr.stop_init, tr.stop_price);
+      assert.strictEqual(tr.target_init, tr.target_price);
+    }
+  }
+});
+
+t("追踪模式全链路：权益曲线、风险指标与蒙特卡洛同步", () => {
+  const m = market.generateMarket({ seed: 11, days: 800, vol: 0.018 });
+  const r = bt.backtest(m, {
+    cash: 100000, feeRate: 0.0005, slippageBp: 5, stopMode: "trail",
+    atrN: 14, atrStopMult: 2, atrTargetMult: 4, atrVolN: 50,
+    strategy: { type: "boll", bbN: 20, bbK: 2 },
+  });
+  assert.strictEqual(r.equity.length, 800);
+  assert(Number.isFinite(r.final_equity));
+  assert(r.trades.length > 0);
+  for (const tr of r.trades) {
+    assert.strictEqual(tr.stop_mode, "trail");
+    assert(tr.stop_price >= tr.stop_init - 1e-9); // 止损只紧不松
+    assert(Number.isFinite(tr.stop_price) && Number.isFinite(tr.target_price));
+  }
+  const s = metrics.summarize(r.equity, {});
+  assert(Number.isFinite(s.sharpe) && Number.isFinite(s.max_drawdown));
+  const sim = mc.simulate(r.equity, 200, 60, 13);
+  assert.strictEqual(sim.quantiles.p50.length, 61);
+  assert(sim.prob_loss >= 0 && sim.prob_loss <= 1);
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

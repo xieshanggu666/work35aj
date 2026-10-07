@@ -59,19 +59,20 @@ function stateMult(state, lowM, highM) {
   return 1;
 }
 
-// 入场当日锁定止损/止盈触发价。
+// 入场当日解析止损/止盈触发价。
 // fixed：入场价 ± 固定比例，与历史行为完全一致。
-// atr：距离 = ATR(refIdx) × 倍数 × 波动状态乘数；refIdx 为入场前一根，杜绝前视。
+// atr / trail：距离 = ATR(refIdx) × 倍数 × 波动状态乘数；refIdx 为入场前一根，杜绝前视。
 //      若入场前 ATR 尚不可得（数据预热期），回退到固定比例（可为 0 表示不设）。
+//      atr 模式此后锁定不变；trail 模式每个交易日再经 updateTrailStops 逐日调整。
 function resolveStops(o) {
-  const mode = o.mode === "atr" ? "atr" : "fixed";
+  const mode = o.mode === "atr" || o.mode === "trail" ? o.mode : "fixed";
   const ref = o.atrArr[o.refIdx];
   const vs = o.volArr[o.refIdx] || { state: "正常", ratio: null };
   const mult = stateMult(vs.state, o.lowMult, o.highMult);
   let stopPrice = 0;
   let targetPrice = 0;
   let atrUsed = null;
-  if (mode === "atr" && ref != null && ref > 0) {
+  if ((mode === "atr" || mode === "trail") && ref != null && ref > 0) {
     atrUsed = ref;
     if (o.atrStopMult > 0) stopPrice = o.entryPrice - ref * o.atrStopMult * mult;
     if (o.atrTargetMult > 0) targetPrice = o.entryPrice + ref * o.atrTargetMult * mult;
@@ -90,6 +91,30 @@ function resolveStops(o) {
   };
 }
 
+// 可追踪（trail）规则的逐日调整：每个交易日用截至前一根 K 线的数据重算退出价。
+// 止损锚定持仓期最高收盘价（吊灯式），只能收紧不能放松；止盈锚定入场价，
+// 距离随最新 ATR × 波动状态乘数每日收放。ATR 不可得（预热期）时维持入场时的
+// 固定比例兜底不变。全部引用 refIdx（前一根）数据，无前视。
+function updateTrailStops(cur, o) {
+  const ref = o.atrArr[o.refIdx];
+  if (ref == null || ref <= 0) return cur;
+  const vs = o.volArr[o.refIdx] || { state: "正常", ratio: null };
+  const mult = stateMult(vs.state, o.lowMult, o.highMult);
+  if (o.atrStopMult > 0) {
+    const cand = o.highWater - ref * o.atrStopMult * mult;
+    if (cand > cur.stopPrice) {
+      cur.stopPrice = cand;
+      cur.updates = (cur.updates || 0) + 1;
+    }
+  }
+  if (o.atrTargetMult > 0) cur.targetPrice = o.entryPrice + ref * o.atrTargetMult * mult;
+  cur.atrRef = ref;
+  cur.volState = vs.state;
+  cur.volRatio = vs.ratio;
+  cur.volMult = mult;
+  return cur;
+}
+
 function backtest(market, opts, signalOverride) {
   const rows = market.rows;
   const n = rows.length;
@@ -102,8 +127,9 @@ function backtest(market, opts, signalOverride) {
   const positionRatio = opts2.positionRatio == null ? 1 : Math.max(0, Math.min(1, opts2.positionRatio));
   const signal = signalOverride || buildSignal(rows, opts2.strategy);
 
-  // 止损止盈模式：默认 fixed，保持旧参数可复现；atr 为按 ATR + 波动状态动态调整
-  const stopMode = opts2.stopMode === "atr" ? "atr" : "fixed";
+  // 止损止盈模式：默认 fixed，保持旧参数可复现；atr 按入场前 ATR + 波动状态锁定；
+  // trail 为可追踪规则，在 atr 初始价基础上每个交易日随波动变化逐日调整
+  const stopMode = opts2.stopMode === "atr" || opts2.stopMode === "trail" ? opts2.stopMode : "fixed";
   const atrN = Math.max(2, opts2.atrN || 14);
   const atrStopMult = opts2.atrStopMult == null ? 2 : opts2.atrStopMult;
   const atrTargetMult = opts2.atrTargetMult == null ? 4 : opts2.atrTargetMult;
@@ -123,6 +149,7 @@ function backtest(market, opts, signalOverride) {
   let entryIdx = 0;
   let stopOutBar = -1;
   let curStops = null;
+  let highWater = 0;
   const equity = new Array(n).fill(null);
   const trades = [];
 
@@ -138,6 +165,9 @@ function backtest(market, opts, signalOverride) {
       exit_price: exitPrice,
       stop_price: curStops ? curStops.stopPrice : 0,
       target_price: curStops ? curStops.targetPrice : 0,
+      stop_init: curStops && curStops.stopInit != null ? curStops.stopInit : curStops ? curStops.stopPrice : 0,
+      target_init: curStops && curStops.targetInit != null ? curStops.targetInit : curStops ? curStops.targetPrice : 0,
+      stop_updates: curStops ? curStops.updates || 0 : 0,
       stop_mode: curStops ? curStops.mode : stopMode,
       atr_ref: curStops ? curStops.atrRef : null,
       vol_state: curStops ? curStops.volState : "正常",
@@ -156,6 +186,21 @@ function backtest(market, opts, signalOverride) {
   for (let i = 0; i < n; i++) {
     const bar = rows[i];
     if (inPos) {
+      // 可追踪规则：先用截至前一根的数据重算退出价，再判断当日触发
+      if (stopMode === "trail" && i > entryIdx) {
+        if (rows[i - 1].close > highWater) highWater = rows[i - 1].close;
+        updateTrailStops(curStops, {
+          refIdx: i - 1,
+          atrArr,
+          volArr,
+          highWater,
+          entryPrice,
+          atrStopMult,
+          atrTargetMult,
+          lowMult: volLowMult,
+          highMult: volHighMult,
+        });
+      }
       const sl = curStops.stopPrice;
       const tp = curStops.targetPrice;
       let exitPrice = null;
@@ -195,6 +240,11 @@ function backtest(market, opts, signalOverride) {
           lowMult: volLowMult,
           highMult: volHighMult,
         });
+        // 记录入场当日的初始触发价；trail 模式以此为起点逐日追踪
+        curStops.stopInit = curStops.stopPrice;
+        curStops.targetInit = curStops.targetPrice;
+        curStops.updates = 0;
+        highWater = entryPrice;
       }
     } else if (desired === 0 && inPos) {
       closeTrade(i, bar.open, "信号平仓");
@@ -223,4 +273,4 @@ function computeDrawdown(equity) {
   return out;
 }
 
-module.exports = { backtest, buildSignal, computeDrawdown, volStateSeries, resolveStops };
+module.exports = { backtest, buildSignal, computeDrawdown, volStateSeries, resolveStops, updateTrailStops };
