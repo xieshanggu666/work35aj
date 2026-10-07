@@ -21,6 +21,7 @@ const app = createApp({
         cash: 100000, feeRate: 0.0005, slippageBp: 5, positionRatio: 1,
         stopMode: "fixed", stopLoss: 0.05, takeProfit: 0.15,
         atrN: 14, atrStopMult: 2, atrTargetMult: 4, atrVolN: 50, volLowMult: 0.8, volHighMult: 1.5,
+        trailHighN: 0,
       },
       stats: null,
       trades: [],
@@ -28,6 +29,8 @@ const app = createApp({
       drawdown: null,
       rows: null,
       dates: null,
+      stopLine: null,
+      targetLine: null,
       mc: null,
     };
   },
@@ -43,12 +46,19 @@ const app = createApp({
         this.drawdown = r.drawdown;
         this.rows = r.rows;
         this.dates = r.dates;
+        this.stopLine = r.stop_line || null;
+        this.targetLine = r.target_line || null;
         this.$nextTick(() => {
           const close = this.rows.map(x => x.close);
           const overlays = [];
           if (this.strategy.type === "ma_cross") {
             overlays.push({ color: "#ffd166", data: smaArr(close, this.strategy.fast) });
             overlays.push({ color: "#7a5cff", data: smaArr(close, this.strategy.slow) });
+          }
+          // 追踪模式叠加逐日止损（橙虚线）/止盈（青虚线）；固定与入场锁定模式为水平线
+          if (this.stopLine && this.stopLine.some(v => v != null)) {
+            overlays.push({ color: "#ff8c42", data: this.stopLine, dash: [5, 3] });
+            overlays.push({ color: "#36d6c3", data: this.targetLine, dash: [5, 3] });
           }
           Charts.kline(this.$refs.kchart, this.rows, overlays);
           Charts.series(this.$refs.echart, this.equity, { color: "#4f8cff" });

@@ -65,7 +65,8 @@
         <label>止损模式
           <select v-model="trade.stopMode">
             <option value="fixed">固定比例</option>
-            <option value="atr">ATR 动态（按波动状态）</option>
+            <option value="atr">ATR 动态（入场锁定）</option>
+            <option value="trail">ATR 追踪（逐日调整）</option>
           </select>
         </label>
         <template v-if="trade.stopMode === 'fixed'">
@@ -79,7 +80,11 @@
           <label>波动窗口 <input type="number" v-model.number="trade.atrVolN" step="1" min="2"></label>
           <label>低波动乘数 <input type="number" v-model.number="trade.volLowMult" step="0.1"></label>
           <label>高波动乘数 <input type="number" v-model.number="trade.volHighMult" step="0.1"></label>
-          <p class="hint">触发距离 = 入场前 ATR × 倍数 × 波动乘数；高波动放宽、低波动收紧。预热期 ATR 不足时回退固定比例。</p>
+          <p class="hint" v-if="trade.stopMode === 'atr'">触发距离 = 入场前 ATR × 倍数 × 波动乘数；高波动放宽、低波动收紧，入场当日锁定。预热期 ATR 不足时回退固定比例。</p>
+          <template v-else>
+            <label>追踪高点窗口(bar,0=入场以来) <input type="number" v-model.number="trade.trailHighN" step="1" min="0"></label>
+            <p class="hint">止损 = 持仓高点 − 当日 ATR×倍数×波动乘数，只上移不下移（吊灯式）；止盈 = 入场价 + 当日 ATR×倍数×波动乘数，随波动逐日收紧/放宽。所有调整在收盘后计算、次日生效，无前视。</p>
+          </template>
         </template>
         <label>仓位比例 <input type="range" min="0.1" max="1" step="0.05" v-model.number="trade.positionRatio"> {{ (trade.positionRatio*100).toFixed(0) }}%</label>
       </section>
@@ -116,17 +121,21 @@
       <h3>逐笔交易（{{ trades.length }} 笔）</h3>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>#</th><th>买入日</th><th>卖出日</th><th>买入价</th><th>卖出价</th><th>止损价</th><th>止盈价</th><th>波动状态</th><th>股数</th><th>盈亏</th><th>持有(bar)</th><th>原因</th></tr></thead>
+          <thead><tr><th>#</th><th>买入日</th><th>卖出日</th><th>买入价</th><th>卖出价</th><th>初始止损</th><th>平仓止损</th><th>初始止盈</th><th>平仓止盈</th><th>波动状态</th><th>股数</th><th>盈亏</th><th>持有(bar)</th><th>调整(止/盈)</th><th>原因</th></tr></thead>
           <tbody>
             <tr v-for="(t, i) in trades" :key="i">
               <td>{{ i + 1 }}</td><td>{{ t.entry_date }}</td><td>{{ t.exit_date }}</td>
               <td>{{ t.entry_price.toFixed(2) }}</td><td>{{ t.exit_price.toFixed(2) }}</td>
+              <td>{{ t.init_stop_price > 0 ? t.init_stop_price.toFixed(2) : '—' }}</td>
               <td>{{ t.stop_price > 0 ? t.stop_price.toFixed(2) : '—' }}</td>
+              <td>{{ t.init_target_price > 0 ? t.init_target_price.toFixed(2) : '—' }}</td>
               <td>{{ t.target_price > 0 ? t.target_price.toFixed(2) : '—' }}</td>
-              <td>{{ t.vol_state }}</td>
+              <td :title="t.stop_mode === 'trail' && t.vol_state !== t.init_vol_state ? ('入场：' + t.init_vol_state + ' ×' + t.init_vol_mult + ' → 平仓：' + t.vol_state + ' ×' + t.vol_mult) : (t.vol_state + ' ×' + t.vol_mult)">{{ t.vol_state }}</td>
               <td>{{ t.shares }}</td>
               <td :class="t.pnl >= 0 ? 'up' : 'down'">{{ t.pnl.toFixed(0) }}</td>
-              <td>{{ t.hold_bars }}</td><td>{{ t.reason }}</td>
+              <td>{{ t.hold_bars }}</td>
+              <td :title="t.stop_mode === 'trail' ? '追踪模式：止损上移/止盈重算次数' : '固定或入场锁定模式不调整'">{{ t.stop_adj }} / {{ t.target_adj }}</td>
+              <td>{{ t.reason }}</td>
             </tr>
           </tbody>
         </table>

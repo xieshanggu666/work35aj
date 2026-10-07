@@ -46,6 +46,7 @@ const Charts = {
     if (overlays) {
       for (const ov of overlays) {
         ctx.strokeStyle = ov.color; ctx.lineWidth = 1.2;
+        if (ov.dash) ctx.setLineDash(ov.dash);
         ctx.beginPath();
         let started = false;
         ov.data.forEach((v, i) => {
@@ -54,6 +55,7 @@ const Charts = {
           if (!started) { ctx.moveTo(px, py); started = true; } else ctx.lineTo(px, py);
         });
         ctx.stroke();
+        ctx.setLineDash([]);
         ctx.lineWidth = 1;
       }
     }

@@ -65,11 +65,14 @@ const server = http.createServer(async (req, res) => {
       const stats = metrics.summarize(r.equity, body.options || {});
       const equityPts = r.equity.map((v, i) => [i, Math.round(v * 100) / 100]);
       const ddPts = r.drawdown.map((v, i) => [i, Math.round(v * 10000) / 10000]);
+      const line2 = arr => arr.map(v => (v == null ? null : Math.round(v * 100) / 100));
       return json(res, 200, {
         dates: m.dates,
         rows: m.rows,
         equity: equityPts,
         drawdown: ddPts,
+        stop_line: line2(r.stop_line),
+        target_line: line2(r.target_line),
         trades: r.trades,
         stats,
         final_equity: Math.round(r.final_equity * 100) / 100,

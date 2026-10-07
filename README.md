@@ -32,8 +32,12 @@ invest_backtest/
 - **止损止盈**：持仓期间按当日最高/最低价触发；若开盘跳空越过触发价，按开盘价成交；止损/止盈平仓当日不再进场。
   - `stopMode: "fixed"`（默认）：固定比例，`stopLoss`/`takeProfit` 为相对入场价的百分比；不传 `stopMode` 的旧参数与历史结果逐位一致。
   - `stopMode: "atr"`：入场当日锁定触发价，距离 = `ATR(atrN)` × 倍数（`atrStopMult`/`atrTargetMult`）× 波动状态乘数。ATR 与波动状态只引用**入场前一根**（`i-1`）数据，无前视；预热期 ATR 不足时回退固定比例（比例为 0 则不设止损止盈）。
+  - `stopMode: "trail"`：可追踪规则，触发价在**每根 K 线收盘后**用截至当根的数据重算、次日开盘起生效，无盘中重绘、无前视：
+    - 止损（吊灯式）：`max(持仓窗口最高价) − ATR(i) × atrStopMult × 波动乘数`，只上移不下移（ratchet 锁定盈利）；`trailHighN=0`（默认）取入场以来全部高点，否则取最近 N 根。
+    - 止盈：`入场价 + ATR(i) × atrTargetMult × 波动乘数`，随波动收缩/扩张逐日双向调整。
+    - 初始触发价（入场当日）与 `atr` 模式同法计算；预热期 ATR 不足时同样回退固定比例。
   - 波动状态：`ATR / ATR 的 atrVolN 均值 ≤ volLowK(0.7)` 为低波动（乘数 `volLowMult=0.8`，收紧），`≥ volHighK(1.3)` 为高波动（乘数 `volHighMult=1.5`，放宽），否则正常（乘数 1）。
-  - 逐笔交易统一记录 `stop_price`/`target_price`/`stop_mode`/`atr_ref`/`vol_state`/`vol_mult`，固定模式同样填充（`atr_ref` 为 `null`），回测撮合、风险指标与前端展示共用同一套历史解释。
+  - 逐笔交易统一记录初始/平仓触发价与追踪过程：`stop_price`/`target_price`（平仓时生效价）、`init_stop_price`/`init_target_price`、`stop_adj`/`target_adj`（调整次数）、`stop_trail`/`target_trail`（`[bar, 价]` 逐日轨迹，仅 trail 模式非 null）、`stop_mode`/`atr_ref`/`vol_state`/`vol_mult`（平仓时）与 `init_vol_state`/`init_vol_mult`（入场时，固定/atr 模式 `atr_ref` 为 `null`）。回测结果另返回与 K 线对齐的 `stop_line`/`target_line`，供前端叠加；回测撮合、权益曲线、风险指标、蒙特卡洛与前端展示共用同一套历史解释。
 - **成本模型**：成交价叠加滑点（买入上浮、卖出下浮），双边收取手续费。
 - **风险指标**：收益序列采用对数收益，年化按 252 个交易日折算；下行波动只统计负收益；最大回撤记录回撤区间。
 - **蒙特卡洛**：对历史对数收益自助重采样生成模拟路径，输出 5%/50%/95% 分位带与亏损概率。
@@ -49,4 +53,4 @@ invest_backtest/
 
 ## 测试
 
-`npm test` 覆盖指标手算、撮合时点、止损语义、成本模型、最大回撤、蒙特卡洛统计性质、ATR 动态止损止盈、波动状态与旧参数复现等 30 个用例。
+`npm test` 覆盖指标手算、撮合时点、止损语义、成本模型、最大回撤、蒙特卡洛统计性质、ATR 入场锁定、ATR 追踪规则、波动状态与旧参数复现等 37 个用例。
